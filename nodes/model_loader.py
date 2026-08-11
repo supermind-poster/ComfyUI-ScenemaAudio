@@ -4,31 +4,30 @@
 
 """Scenema Audio model loader node for ComfyUI.
 
-Loads the 3.3B audio-only transformer checkpoint with INT8 or bf16
-precision. Keeps model on CPU until needed for sampling, allowing
-ComfyUI to manage VRAM across nodes.
+Loads the 3.3B audio-only transformer checkpoint from a local file under
+ComfyUI/models/diffusion_models/, the same folder and dropdown behavior
+as the native "Load Diffusion Model" node. No network access — place the
+.safetensors file there yourself before using this node.
 """
 
 import logging
 
 import comfy.model_management
-import torch
 
-from .utils import (
-    TRANSFORMER_BF16,
-    TRANSFORMER_INT8,
-    download_model,
-    load_transformer,
-)
+from .utils import get_diffusion_model_path, list_diffusion_models, load_transformer
 
 logger = logging.getLogger(__name__)
 
 
 class ScenemaAudioModelLoader:
-    """Loads the Scenema Audio transformer model.
+    """Loads the Scenema Audio transformer model from a local checkpoint.
 
-    Downloads the checkpoint from HuggingFace on first use and caches it.
-    Supports INT8 (4.9 GB) and bf16 (9.8 GB) precision.
+    Reads the same models/diffusion_models folder ComfyUI's built-in
+    "Load Diffusion Model" node uses. Supports both bf16
+    (scenema-audio-transformer.safetensors) and INT8
+    (scenema-audio-transformer-int8.safetensors) checkpoints — the
+    format is auto-detected from the file's contents, so just pick the
+    file you downloaded.
     Model stays on CPU until sampling to leave VRAM free for text encoding.
     """
 
@@ -41,14 +40,20 @@ class ScenemaAudioModelLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "precision": (["int8", "bf16"], {"default": "int8"}),
+                "diffusion_model": (list_diffusion_models(), {
+                    "tooltip": (
+                        "Scenema Audio transformer checkpoint. Place "
+                        "scenema-audio-transformer.safetensors (bf16) or "
+                        "scenema-audio-transformer-int8.safetensors (INT8) in "
+                        "ComfyUI/models/diffusion_models/."
+                    ),
+                }),
             },
         }
 
-    def load(self, precision):
-        filename = TRANSFORMER_INT8 if precision == "int8" else TRANSFORMER_BF16
-        logger.info("Downloading/loading %s...", filename)
-        path = download_model(filename)
+    def load(self, diffusion_model):
+        path = get_diffusion_model_path(diffusion_model)
+        logger.info("Loading transformer from %s", path)
 
         mdl_wrapper, config = load_transformer(path)
 

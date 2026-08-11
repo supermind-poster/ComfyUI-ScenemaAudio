@@ -26,10 +26,10 @@ from nodes.utils import (
     Int8Linear,
     FPS,
     MAX_REF_SECONDS,
-    HF_REPO,
     TRANSFORMER_BF16,
     TRANSFORMER_INT8,
     PIPELINE_CKPT,
+    PIPELINE_AUDIO_CKPT,
     VAE_ENCODER_CKPT,
 )
 

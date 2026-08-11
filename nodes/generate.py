@@ -5,52 +5,20 @@
 """Scenema Audio Generate — the main speech generation node.
 
 Takes voice description, gender, speech text, and scene directly. Builds
-the XML the LTX model expects internally, plans chunks via Kokoro, and
-diffuses each chunk with A2V voice chaining. Auto-cleans background bleed
-when the chosen scene implies studio-clean intent.
+the <speak> XML the LTX model expects internally (see generate_core.py
+for the shared diffusion engine also used by ScenemaAudioGenerateXML and
+ScenemaAudioDialogueGenerate).
 """
 
-import gc
 import logging
-import os
-import sys
+import re as _re
 
-import numpy as np
 import torch
-import torchaudio
-from ltx_core.batch_split import BatchSplitAdapter
-from ltx_core.components.diffusion_steps import EulerDiffusionStep
-from ltx_core.components.noisers import GaussianNoiser
-from ltx_core.model.audio_vae.audio_vae import Audio, encode_audio
-from ltx_pipelines.distilled import DISTILLED_SIGMAS
-from ltx_pipelines.utils.denoisers import SimpleDenoiser
-from ltx_pipelines.utils.samplers import euler_denoising_loop
 
-from .sampler import (
-    _build_pixel_shape, _build_video_state, _build_audio_state,
-    _apply_a2v_reference, _strip_reference_frames,
-)
 from .presets import CUSTOM, PRESETS, PRESET_NAMES
-from .text_encode import _encode_via_pipeline, _resolve_gemma_path, DEFAULT_GEMMA
-from .utils import FPS, download_model, PIPELINE_CKPT
-from .vocal_separator import _run_separator
-
-_pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _pkg_root not in sys.path:
-    sys.path.insert(0, _pkg_root)
-
-from audio_core.chunker import plan_chunks, estimate_duration, ChunkSpec
-from audio_core.compiler import compile_prompt
-from audio_core.audio_utils import trim_silence, normalize_volume, shorten_long_silence
-from audio_core.whisper_aligner import validate_text
-
-from .seedvc import convert_voice
+from .generate_core import run_generation
 
 logger = logging.getLogger(__name__)
-
-REF_TAIL_SECONDS = 3.0
-MAX_RETRIES = 3
-RETRY_DURATION_FACTOR = 1.3
 
 # Curated scene presets. First entry is a sentinel that forces the user
 # to make an explicit choice — we raise an error if it's not overridden.
@@ -67,24 +35,12 @@ SCENE_PRESETS = [
     "Rainy outdoors",
 ]
 
-# Scenes that carry the "no ambient / studio-clean" intent. Extended Generate
-# auto-strips background bleed on these unless strip_background_sfx overrides.
 CLEAN_SPEECH_SCENES = {"Absolute silence", "Broadcast studio"}
 
 # 12 tested languages (from the announcement + Pro blog posts on scenema.ai)
 LANGUAGE_OPTIONS = [
-    "English",
-    "Spanish",
-    "French",
-    "German",
-    "Italian",
-    "Portuguese",
-    "Japanese",
-    "Korean",
-    "Chinese",
-    "Hindi",
-    "Arabic",
-    "Swahili",
+    "English", "Spanish", "French", "German", "Italian", "Portuguese",
+    "Japanese", "Korean", "Chinese", "Hindi", "Arabic", "Swahili",
 ]
 
 LANGUAGE_CODES = {
@@ -103,9 +59,6 @@ def _derive_shot(scene):
     return "closeup" if scene in CLEAN_SPEECH_SCENES else "wide"
 
 
-import re as _re
-
-
 def _xml_escape(text):
     """Escape &, <, > for XML text content. Attribute values need extra quoting."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -114,9 +67,6 @@ def _xml_escape(text):
 def _speech_body_parts(speech_text):
     """Parse [bracketed] cues in speech text and yield interleaved
     text and <action> XML fragments in document order.
-
-    Example: "Hello. [He laughs bitterly] Goodbye." becomes:
-      ['  Hello.', '  <action>He laughs bitterly</action>', '  Goodbye.']
     """
     parts = _re.split(r'\[([^\]]+)\]', speech_text)
     for i, part in enumerate(parts):
@@ -130,15 +80,14 @@ def _speech_body_parts(speech_text):
                 yield f"  <action>{_xml_escape(cue)}</action>"
 
 
-def _build_xml(voice_description, gender, speech_text, scene, custom_scene,
-               action_tags, language):
-    """Construct the <speak> XML the compiler expects from form fields.
+def build_xml(voice_description, gender, speech_text, scene, custom_scene,
+              action_tags, language):
+    """Construct the <speak> XML the compiler expects from friendly form fields.
 
     action_tags: multiline field, one cue per line, prepended before the first
         sentence to set the opening delivery.
     speech_text: may contain inline [bracketed cues] that become <action>
-        tags at the exact position they appear — use this for mid-speech
-        cues like [He laughs], [She whispers], [His voice cracks], etc.
+        tags at the exact position they appear.
     """
     scene_text = custom_scene.strip() if custom_scene and custom_scene.strip() else scene
     lang_code = LANGUAGE_CODES.get(language, "en")
@@ -165,53 +114,6 @@ def _build_xml(voice_description, gender, speech_text, scene, custom_scene,
     return f"<speak {attrs}>\n{body}\n</speak>"
 
 
-def _log_vram(label):
-    """Log current and peak VRAM usage."""
-    allocated = torch.cuda.memory_allocated() / 1e9
-    peak = torch.cuda.max_memory_allocated() / 1e9
-    reserved = torch.cuda.memory_reserved() / 1e9
-    logger.info("VRAM [%s]: %.2fGB allocated, %.2fGB peak, %.2fGB reserved",
-                label, allocated, peak, reserved)
-
-
-def _decode_latent(vae_data, latent):
-    """Decode audio latent to waveform."""
-    decoder = vae_data["decoder"]
-    audio_obj = decoder(latent.cuda())
-    waveform = audio_obj.waveform.cpu()
-    sr = audio_obj.sampling_rate
-    if waveform.ndim == 2:
-        waveform = waveform.unsqueeze(0)
-    return waveform, sr
-
-
-def _encode_reference(vae_data, waveform, sr, max_seconds=REF_TAIL_SECONDS):
-    """Encode tail of waveform as A2V reference for next chunk."""
-    encoder = vae_data["encoder"]
-    vae_sr = vae_data["sample_rate"]
-
-    tail_samples = int(max_seconds * sr)
-    wav = waveform[0, :, -tail_samples:]
-
-    if sr != vae_sr:
-        wav = torchaudio.functional.resample(wav.float(), sr, vae_sr)
-
-    if wav.shape[0] == 1:
-        wav = wav.repeat(2, 1)
-
-    encoder_was_cpu = str(next(encoder.parameters()).device) == "cpu"
-    if encoder_was_cpu:
-        encoder.cuda()
-
-    audio_obj = Audio(waveform=wav.unsqueeze(0).cuda(), sampling_rate=vae_sr)
-    latent = encode_audio(audio_obj, encoder)
-
-    if encoder_was_cpu:
-        encoder.cpu()
-
-    return latent
-
-
 class ScenemaAudioGenerate:
     """Generate expressive speech from a voice description + text.
 
@@ -220,6 +122,10 @@ class ScenemaAudioGenerate:
     consistency, then polishing with SeedVC. Auto-strips background bleed
     for clean scenes. Optional Whisper validation retries chunks that
     dropped words.
+
+    For raw <speak> XML prompts (the base model's native format), use
+    Scenema Audio Generate (XML) instead. For multi-speaker dialogue, use
+    Scenema Audio Dialogue Generate.
     """
 
     CATEGORY = "Scenema Audio"
@@ -233,6 +139,9 @@ class ScenemaAudioGenerate:
             "required": {
                 "model": ("SA_MODEL",),
                 "vae": ("SA_VAE",),
+                "text_encoder": ("SA_TEXT_ENCODER", {
+                    "tooltip": "Connect from Scenema Audio Text Encoder Loader.",
+                }),
                 "preset": (PRESET_NAMES, {
                     "default": CUSTOM,
                     "tooltip": "Pick a preset to auto-fill voice, gender, scene, action tags, and speech text. Choose Custom to write your own.",
@@ -277,9 +186,14 @@ class ScenemaAudioGenerate:
                     "default": "auto",
                     "tooltip": "auto = strip only for clean scenes (silence, studio). yes = always strip. no = never strip.",
                 }),
-                "gemma_path": ("STRING", {"default": "auto"}),
                 "ref_latent": ("SA_LATENT", {
                     "tooltip": "Optional voice reference for zero-shot cloning. Connect from VAE Encode fed by LoadAudio.",
+                }),
+                "separator": ("SA_SEPARATOR", {
+                    "tooltip": "Pre-loaded MelBandRoFormer from its loader node. Required if strip_background_sfx ends up stripping (auto/yes) — raises a clear error at runtime if needed and not connected.",
+                }),
+                "voice_clone": ("SA_VOICE_CLONE", {
+                    "tooltip": "Pre-loaded SeedVC stack from Scenema Audio Voice Clone Loader. Required whenever the generation splits into multiple chunks and skip_vc=False — raises a clear error at runtime if needed and not connected.",
                 }),
                 "validate": ("BOOLEAN", {
                     "default": False,
@@ -296,10 +210,11 @@ class ScenemaAudioGenerate:
         }
 
     @torch.inference_mode()
-    def generate(self, model, vae, preset, voice_description, gender, speech_text, scene, seed,
+    def generate(self, model, vae, text_encoder, preset, voice_description, gender,
+                 speech_text, scene, seed,
                  custom_scene="", action_tags="", language="English", pace=1.5,
                  strip_background_sfx="auto",
-                 gemma_path="auto", ref_latent=None,
+                 ref_latent=None, separator=None, voice_clone=None,
                  validate=False, min_match_ratio=0.9,
                  skip_vc=False, vc_steps=25, vc_cfg_rate=0.5):
 
@@ -321,268 +236,14 @@ class ScenemaAudioGenerate:
                 "options, or provide a custom_scene string."
             )
 
-        xml_prompt = _build_xml(voice_description, gender, speech_text,
-                                 scene, custom_scene, action_tags, language)
+        xml_prompt = build_xml(voice_description, gender, speech_text,
+                                scene, custom_scene, action_tags, language)
         logger.info("XML prompt:\n%s", xml_prompt)
-        compiled = compile_prompt(xml_prompt)
-        logger.info("Compiled prompt: %s", compiled.prompt)
-        chunks = self._plan(xml_prompt, compiled.prompt, compiled.speech_text, seed, pace)
-        for i, c in enumerate(chunks):
-            logger.info("Chunk %d prompt: %s", i + 1, c.compiled_prompt)
 
-        torch.cuda.reset_peak_memory_stats()
-        _log_vram("start")
-        logger.info("Generating %d chunk(s) (validate=%s, skip_vc=%s)...",
-                     len(chunks), validate, skip_vc)
-
-        # Offload transformer to CPU before Phase 1: Gemma needs the VRAM.
-        mdl_wrapper = model["model"]
-        device = model["device"]
-        mdl_wrapper.to("cpu")
-        torch.cuda.empty_cache()
-        _log_vram("transformer offloaded pre-Phase 1")
-
-        # ── Phase 1: Encode ALL chunk prompts in one Gemma session ──
-        logger.info("Phase 1: Encoding %d prompts...", len(chunks))
-        chunk_encodings = self._encode_all_chunks(chunks, gemma_path)
-        _log_vram("after all encoding")
-
-        # ── Phase 2: Diffuse + decode ALL chunks in one transformer session ──
-        logger.info("Phase 2: Diffusing %d chunks...", len(chunks))
-        mdl_wrapper.to(device)
-        _log_vram("transformer on GPU")
-
-        chunk_encodings_cpu = [(vc.cpu(), ac.cpu()) for vc, ac in chunk_encodings]
-        del chunk_encodings
-        torch.cuda.empty_cache()
-
-        waveforms = []
-        sr = None
-        current_ref = ref_latent.cpu() if ref_latent is not None else None
-        for i, (chunk, (vc_cpu, ac_cpu)) in enumerate(zip(chunks, chunk_encodings_cpu)):
-            logger.info("  Diffuse chunk %d/%d (%.1fs)", i + 1, len(chunks), chunk.duration_s)
-            vc = vc_cpu.to(device)
-            ac = ac_cpu.to(device)
-            ref_gpu = current_ref.to(device) if current_ref is not None else None
-
-            if validate:
-                waveform = self._diffuse_with_validation(
-                    mdl_wrapper, device, vae, vc, ac, chunk, ref_gpu, min_match_ratio
-                )
-            else:
-                latent = self._diffuse_chunk(mdl_wrapper, device, vc, ac,
-                                              chunk.duration_s, chunk.seed, ref_gpu)
-                waveform, sr = _decode_latent(vae, latent)
-
-            if validate:
-                sr = waveform["sample_rate"]
-                waveform = waveform["waveform"]
-
-            del vc, ac, ref_gpu
-            waveforms.append(waveform)
-
-            if i < len(chunks) - 1:
-                current_ref = _encode_reference(vae, waveform, sr).cpu()
-
-        mdl_wrapper.to("cpu")
-        torch.cuda.empty_cache()
-        _log_vram("after all chunks")
-
-        # Per-chunk trim + normalize before concatenation (matches production).
-        # Prevents perceived voice drift from loudness jumps between chunks
-        # and cleans up leading/trailing silence that LTX often adds.
-        processed_np = []
-        for w in waveforms:
-            # w shape: (1, C, samples)
-            w_np = w.squeeze(0).numpy()  # (C, samples)
-            w_np = w_np.T if w_np.ndim == 2 else w_np  # (samples, C)
-            w_np = trim_silence(w_np, sr, max_silence=0.5)
-            w_np = normalize_volume(w_np, sr)
-            processed_np.append(w_np)
-        combined_np = np.concatenate(processed_np, axis=0)
-        # Cap internal silences too
-        combined_np = shorten_long_silence(combined_np, sr, max_duration=min(0.5 * pace, 1.5))
-
-        # Back to (1, C, samples) tensor for ComfyUI
-        if combined_np.ndim == 2:
-            combined_np = combined_np.T  # (C, samples)
-        combined = torch.from_numpy(combined_np).float()
-        if combined.ndim == 1:
-            combined = combined.unsqueeze(0)
-        combined = combined.unsqueeze(0)  # (1, C, samples)
-        combined_audio = {"waveform": combined, "sample_rate": sr}
-
-        should_strip = self._should_strip_background(scene, strip_background_sfx)
-
-        # Multi-chunk generation drifts subtly between chunks even with the
-        # same voice description, so we polish every chunk against the first
-        # one to lock the voice identity across the whole clip. Single-chunk
-        # generations have nothing to align to, so we skip.
-        needs_vc = len(chunks) > 1
-        if not skip_vc and needs_vc:
-            combined_audio = self._apply_vc(
-                combined_audio, waveforms, sr, ref_latent, vae,
-                vc_steps, vc_cfg_rate,
-            )
-        elif not needs_vc:
-            logger.info("Single chunk — skipping cross-chunk voice polish")
-
-        if should_strip:
-            combined_audio = self._strip_background(combined_audio)
-
-        total_duration = combined_audio["waveform"].shape[-1] / combined_audio["sample_rate"]
-        logger.info("Extended generate complete: %.1fs from %d chunk(s)",
-                     total_duration, len(chunks))
-
-        return (combined_audio,)
-
-    def _should_strip_background(self, scene, override):
-        """Decide whether to run MelBandRoFormer post-processing.
-
-        auto: strip if scene implies studio-clean intent (Absolute silence,
-              Broadcast studio). Ambient scenes (outdoor, café, hall, etc.)
-              are left alone since users chose them for the ambient bleed.
-        yes: always strip.
-        no: never strip.
-        """
-        if override == "yes":
-            return True
-        if override == "no":
-            return False
-        return scene in CLEAN_SPEECH_SCENES
-
-    def _strip_background(self, audio):
-        """Run MelBandRoFormer to isolate speech from any ambient bleed."""
-        logger.info("Stripping background SFX (scene = studio-clean intent)...")
-        vocals_t, _, sr = _run_separator(audio)
-        return {"waveform": vocals_t, "sample_rate": sr}
-
-    def _diffuse_with_validation(self, mdl_wrapper, device, vae, vc, ac, chunk,
-                                  ref_gpu, min_match_ratio):
-        """Diffuse a chunk with Whisper validation and retry on word-match failure."""
-        duration = chunk.duration_s
-        seed = chunk.seed
-        best_waveform = None
-        best_sr = None
-        best_ratio = -1.0
-
-        for attempt in range(MAX_RETRIES + 1):
-            latent = self._diffuse_chunk(mdl_wrapper, device, vc, ac, duration, seed, ref_gpu)
-            waveform, sr = _decode_latent(vae, latent)
-
-            wav_np = waveform.squeeze(0).numpy()
-            if wav_np.ndim == 2:
-                wav_np = wav_np.T
-            passed, transcribed, ratio = validate_text(
-                wav_np, sr, chunk.expected_text,
-                language=chunk.language, min_word_ratio=min_match_ratio,
-            )
-
-            if ratio > best_ratio:
-                best_waveform = waveform
-                best_sr = sr
-                best_ratio = ratio
-
-            if passed:
-                logger.info("  Validated: %.0f%% word match", ratio * 100)
-                return {"waveform": best_waveform, "sample_rate": best_sr}
-
-            if attempt < MAX_RETRIES:
-                duration = min(duration * RETRY_DURATION_FACTOR, 20.0)
-                seed += 1
-                logger.info("  Retry %d: %.0f%% match, extending to %.1fs, seed=%d",
-                             attempt + 1, ratio * 100, duration, seed)
-
-        logger.warning("  Best %.0f%% match after %d retries, accepting",
-                        best_ratio * 100, MAX_RETRIES)
-        return {"waveform": best_waveform, "sample_rate": best_sr}
-
-    def _encode_all_chunks(self, chunks, gemma_path):
-        """Encode all chunk prompts via the LTX pipeline's PromptEncoder.
-
-        Matches production Scenema Audio exactly. The pipeline internally
-        streams Gemma layer-by-layer for encoding, then runs full
-        process_hidden_states through the embeddings processor.
-        """
-        if gemma_path == "auto":
-            gemma_path = DEFAULT_GEMMA
-
-        gemma_local = _resolve_gemma_path(gemma_path)
-        pipeline_path = download_model(PIPELINE_CKPT)
-
-        all_encodings = []
-        for i, chunk in enumerate(chunks):
-            logger.info("  Encoding chunk %d/%d", i + 1, len(chunks))
-            vc, ac = _encode_via_pipeline(chunk.compiled_prompt, gemma_local, pipeline_path)
-            all_encodings.append((vc, ac))
-
-        return all_encodings
-
-    def _diffuse_chunk(self, mdl_wrapper, device, vc, ac, duration_s, seed, ref_latent=None):
-        """Run diffusion for a single chunk. Transformer must already be on GPU."""
-        pixel_shape = _build_pixel_shape(duration_s)
-        gen = torch.Generator(device=device).manual_seed(seed)
-        noiser = GaussianNoiser(generator=gen)
-
-        video_state = _build_video_state(pixel_shape, vc, noiser, device)
-        audio_state, audio_tools = _build_audio_state(pixel_shape, ac, noiser, device)
-
-        ref_frames = 0
-        if ref_latent is not None:
-            audio_state, ref_frames = _apply_a2v_reference(
-                audio_state, ac, ref_latent, seed, device
-            )
-
-        sigmas = DISTILLED_SIGMAS.to(dtype=torch.float32, device=device)
-        stepper = EulerDiffusionStep()
-        wrapped = BatchSplitAdapter(mdl_wrapper, max_batch_size=1)
-
-        _, audio_state_out = euler_denoising_loop(
-            sigmas=sigmas,
-            video_state=video_state,
-            audio_state=audio_state,
-            stepper=stepper,
-            transformer=wrapped,
-            denoiser=SimpleDenoiser(vc, ac),
+        combined_audio = run_generation(
+            model, vae, text_encoder, xml_prompt, seed, separator, voice_clone,
+            pace, strip_background_sfx, ref_latent, validate, min_match_ratio,
+            skip_vc, vc_steps, vc_cfg_rate,
         )
 
-        if ref_frames > 0 and audio_state_out is not None:
-            audio_state_out = _strip_reference_frames(audio_state_out, ref_frames)
-
-        audio_state_out = audio_tools.clear_conditioning(audio_state_out)
-        audio_state_out = audio_tools.unpatchify(audio_state_out)
-
-        return audio_state_out.latent
-
-    def _apply_vc(self, combined_audio, chunk_waveforms, sr, ref_latent, vae,
-                  vc_steps, vc_cfg_rate):
-        """Apply SeedVC for voice consistency across chunks."""
-        chunk0_audio = {"waveform": chunk_waveforms[0], "sample_rate": sr}
-
-        logger.info("Applying SeedVC (%d steps, cfg_rate=%.2f)...", vc_steps, vc_cfg_rate)
-        result = convert_voice(combined_audio, chunk0_audio, vc_steps, vc_cfg_rate)
-
-        if result["sample_rate"] != sr:
-            result_wav = torchaudio.functional.resample(
-                result["waveform"].float(), result["sample_rate"], sr
-            )
-            result = {"waveform": result_wav, "sample_rate": sr}
-
-        return result
-
-    def _plan(self, xml_prompt, compiled_prompt, speech_text, seed, pace):
-        """Plan chunks from the XML — falls back to single chunk on failure."""
-        try:
-            chunks = plan_chunks(xml_prompt, base_seed=seed, pace=pace)
-            if chunks:
-                return chunks
-        except Exception as e:
-            logger.warning("Chunking failed, falling back to single chunk: %s", e)
-
-        duration = estimate_duration(speech_text, multiplier=pace)
-        return [ChunkSpec(
-            compiled_prompt=compiled_prompt,
-            duration_s=duration,
-            seed=seed,
-            expected_text=speech_text,
-        )]
+        return (combined_audio,)

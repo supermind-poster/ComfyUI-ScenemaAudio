@@ -20,8 +20,10 @@ sentencepiece>=0.2.0
 # Duration estimation (Kokoro)
 kokoro>=0.9.0
 
-# Whisper validation
-faster-whisper>=1.0.0
+# Whisper validation (validate=True, !INTERRUPTION! marker in Dialogue Generate)
+# Reuses whichever local whisper-small folder Voice Clone Loader points at
+# (models/voice_clone/whisper-small/) via transformers — no separate model
+# or format needed.
 
 # MelBandRoFormer vocal separation
 rotary-embedding-torch>=0.8.0

@@ -1,0 +1,35 @@
+Scenema Audio Voice Clone Loader reads from this folder:
+
+  campplus_cn_common.bin    (file, directly in this folder)
+  bigvgan/                  (folder: config.json + weights)
+  whisper-small/            (folder: config.json + weights)
+
+None of these are gated. Either run:
+
+    python ComfyUI/custom_nodes/ComfyUI-ScenemaAudio/scripts/prefetch_aux_models.py
+
+...or grab them by hand:
+
+huggingface-cli download funasr/campplus campplus_cn_common.bin \
+    --local-dir ComfyUI/custom_nodes/ComfyUI-ScenemaAudio/models/voice_clone
+huggingface-cli download nvidia/bigvgan_v2_22khz_80band_256x \
+    --local-dir ComfyUI/custom_nodes/ComfyUI-ScenemaAudio/models/voice_clone/bigvgan
+huggingface-cli download openai/whisper-small \
+    --local-dir ComfyUI/custom_nodes/ComfyUI-ScenemaAudio/models/voice_clone/whisper-small
+
+Optional: the SeedVC DiT checkpoint can also live here —
+
+  DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth
+  config_dit_mel_seed_uvit_whisper_small_wavenet.yml
+
+If both files are here, the loader uses them directly. If not, it's the
+ONE thing in this whole package allowed to fall back to HuggingFace
+(Plachta/Seed-VC) — and only as a last resort, caching the result back
+into this folder afterward so every run after the first is local too.
+
+Note: the whisper-small/ folder above is also reused by validate=True
+and the !INTERRUPTION! marker (audio_core/whisper_aligner.py) — if it's
+here for Voice Clone Loader, those features work automatically, no
+separate download needed for them.
+
+This file can be deleted once you've placed real checkpoints here.

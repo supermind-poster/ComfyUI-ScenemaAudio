@@ -2,144 +2,75 @@
 # https://scenema.ai
 # SPDX-License-Identifier: MIT
 
-"""Scenema Audio text encoding.
+"""Scenema Audio text encoding — fully local, no HuggingFace network calls.
 
-Ports production Scenema Audio's three-path Gemma encoding strategy:
-1. NF4 quantized on GPU (~8GB, ~0.1s/encode) — auto-selected for 12-39GB cards
-2. bf16 GPU-resident (~24GB, ~1-2s/encode) — auto-selected for 40GB+ cards
-3. bf16 CPU streaming (~7s/encode) — fallback for <12GB cards
+Loading the Gemma 3 12B IT weights happens once in
+ScenemaAudioTextEncoderLoader (nodes/text_encoder_loader.py). This module
+holds the shared build/cache/encode logic used by both the standalone
+ScenemaAudioTextEncode node and ScenemaAudioGenerate.
 
-All paths cache the text encoder and embeddings processor across calls,
-so subsequent encodes reuse the same models without rebuild/teardown.
-This matches production/scenema-audio/src/audio_core/engine.py.
+Gemma 3 12B IT ships from Google as a standard HuggingFace-layout folder
+(config.json + tokenizer files + sharded *.safetensors). safetensors
+already memory-maps weights lazily — `transformers.from_pretrained`
+loading a local directory with `local_files_only=True` is exactly that
+"lazy safetensors" loading, no special format or conversion needed. You
+just need the folder to already exist on disk; see README for how to
+fetch it once.
+
+Three encode paths, matching production Scenema Audio, auto-selected by
+available VRAM (or forced via the loader's `precision` input):
+  - nf4:           NF4-quantized Gemma on GPU (~8GB)   — 12-39GB cards
+  - bf16_gpu:       full bf16 Gemma resident on GPU (~24GB) — 40GB+ cards
+  - cpu_streaming:  Gemma streamed from CPU RAM per call — <12GB cards
 """
 
-import gc
 import logging
 import os
 
-import comfy.model_management
 import torch
-from huggingface_hub import HfFolder, snapshot_download
-from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
 from ltx_core.text_encoders.gemma.tokenizer import LTXVGemmaTokenizer
 from ltx_pipelines.distilled import DistilledPipeline
 from ltx_pipelines.utils.types import OffloadMode
 from transformers import BitsAndBytesConfig, Gemma3ForConditionalGeneration
 
-from .utils import download_model, PIPELINE_CKPT
-
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMMA = "google/gemma-3-12b-it"
+# Belt-and-suspenders: force transformers/huggingface_hub into offline
+# mode process-wide. Nothing in this codepath calls hf_hub_download or
+# snapshot_download anymore, but some libraries probe the network by
+# default (e.g. checking for newer configs) unless this is set — and we
+# want a hard guarantee that loading NEVER reaches out, even if a local
+# folder happens to look incomplete.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-# VRAM thresholds matching production:
-# >= 40GB: bf16 Gemma fully on GPU (fastest, best quality)
-# 12-39GB: NF4 quantized Gemma on GPU (~8GB, minor quality tradeoff)
-# <12GB: streaming from CPU RAM (slow but works everywhere)
 HIGH_VRAM_THRESHOLD_GB = 40
 NF4_MIN_VRAM_GB = 12
 
-# Module-level cache — persists across node invocations for the lifetime
-# of the ComfyUI process. Rebuilding these is the difference between ~5s
-# and ~50s per generation.
-_PIPELINE: DistilledPipeline | None = None
-_PIPELINE_KEY: str | None = None
-_RESIDENT_TEXT_ENCODER = None
-_NF4_GEMMA_MODEL = None
-_CACHED_EMB_PROC = None
-_CACHED_TOKENIZER: LTXVGemmaTokenizer | None = None
-_ENCODE_MODE: str | None = None  # "nf4" | "bf16_gpu" | "streaming"
+# Only one Gemma stack is kept resident at a time (12B is heavy) — keyed
+# by (gemma_path, pipeline_path, precision) so switching loaders rebuilds.
+_CACHE_KEY = None
+_CACHE_ENTRY = None
 
 
-_HF_TOKEN_MSG = (
-    "Gemma 3 12B is a gated model and requires a HuggingFace token.\n"
-    "\n"
-    "1. Visit https://huggingface.co/google/gemma-3-12b-it and click "
-    "'Agree and access repository'.\n"
-    "2. Create a token at https://huggingface.co/settings/tokens "
-    "(any scope with read access works).\n"
-    "3. Provide the token in one of these ways before launching ComfyUI:\n"
-    "     huggingface-cli login\n"
-    "   OR set the environment variable:\n"
-    "     export HF_TOKEN=hf_...\n"
-    "\n"
-    "Once done, restart ComfyUI and retry."
-)
-
-
-def _check_hf_token():
-    """Fail loudly if no HF token is available before we try to download Gemma."""
-    has_env = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
-    has_cli = bool(HfFolder.get_token())
-    if not (has_env or has_cli):
-        raise RuntimeError(_HF_TOKEN_MSG)
-
-
-def _resolve_gemma_path(gemma_path):
-    """Resolve Gemma path to a local directory (auto-downloads if needed).
-
-    Fails loudly with actionable instructions if the user hasn't set up
-    HuggingFace credentials — Gemma 3 12B is gated and can't be
-    downloaded anonymously.
+def select_encode_mode(vram_gb: float, precision: str = "auto") -> str:
+    """Match production's Gemma loading strategy for the current VRAM tier,
+    unless the caller forces a specific precision.
     """
-    if os.path.isdir(gemma_path):
-        return gemma_path
-
-    _check_hf_token()
-    try:
-        return snapshot_download(gemma_path)
-    except GatedRepoError as e:
-        raise RuntimeError(
-            f"HuggingFace rejected the token for {gemma_path}. "
-            f"Make sure you've accepted the license at "
-            f"https://huggingface.co/{gemma_path}\n\nOriginal error: {e}"
-        ) from e
-    except RepositoryNotFoundError as e:
-        raise RuntimeError(
-            f"HuggingFace repo {gemma_path} not found or you lack access. "
-            f"Check the path and your token permissions.\n\nOriginal error: {e}"
-        ) from e
-
-
-def _select_encode_mode(vram_gb: float) -> str:
-    """Match production's Gemma loading strategy for the current VRAM tier."""
+    if precision != "auto":
+        return precision
     if vram_gb >= HIGH_VRAM_THRESHOLD_GB:
         return "bf16_gpu"
     if vram_gb >= NF4_MIN_VRAM_GB:
         return "nf4"
-    return "streaming"
-
-
-def _build_pipeline(gemma_path, pipeline_path):
-    """Instantiate DistilledPipeline once and cache it."""
-    global _PIPELINE, _PIPELINE_KEY
-    key = f"{gemma_path}::{pipeline_path}"
-    if _PIPELINE is not None and _PIPELINE_KEY == key:
-        return _PIPELINE
-
-    if _PIPELINE is not None:
-        logger.info("Rebuilding pipeline (paths changed)")
-        _teardown_cache()
-
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-    offload = OffloadMode.NONE if vram_gb >= HIGH_VRAM_THRESHOLD_GB else OffloadMode.CPU
-
-    logger.info("Building DistilledPipeline (this happens once)...")
-    _PIPELINE = DistilledPipeline(
-        distilled_checkpoint_path=pipeline_path,
-        gemma_root=gemma_path,
-        spatial_upsampler_path=None,
-        loras=[],
-        offload_mode=offload,
-    )
-    _PIPELINE_KEY = key
-    return _PIPELINE
+    return "cpu_streaming"
 
 
 def _build_nf4_gemma(gemma_path):
-    """Load Gemma 3 12B with BitsAndBytes NF4 quantization (~8GB on GPU)."""
-    logger.info("Loading Gemma NF4 on GPU (one-time)...")
+    """Load Gemma 3 12B with BitsAndBytes NF4 quantization (~8GB on GPU),
+    entirely from local disk.
+    """
+    logger.info("Loading Gemma NF4 on GPU from local files (one-time)...")
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
@@ -150,97 +81,105 @@ def _build_nf4_gemma(gemma_path):
         quantization_config=quant_config,
         device_map="cuda",
         dtype=torch.bfloat16,
+        local_files_only=True,
     ).eval()
     vram_used_gb = torch.cuda.memory_allocated() / (1024**3)
     logger.info("Gemma NF4 resident: %.1fGB VRAM", vram_used_gb)
     return model
 
 
-def _ensure_cache(gemma_path, pipeline_path):
-    """Set up the encode-mode-appropriate caches. Idempotent per process."""
-    global _RESIDENT_TEXT_ENCODER, _NF4_GEMMA_MODEL, _CACHED_EMB_PROC
-    global _CACHED_TOKENIZER, _ENCODE_MODE
+def build_text_encoder(gemma_path, pipeline_path, precision="auto"):
+    """Build (or reuse a cached) text-encoding stack from local files only.
 
-    pipeline = _build_pipeline(gemma_path, pipeline_path)
+    Args:
+        gemma_path: local directory containing the Gemma 3 12B IT weights.
+        pipeline_path: local scenema-audio-pipeline.safetensors path.
+        precision: "auto" | "nf4" | "bf16_gpu" | "cpu_streaming".
+
+    Returns:
+        An opaque entry dict — pass it straight through as SA_TEXT_ENCODER
+        into ScenemaAudioTextEncode or ScenemaAudioGenerate.
+    """
+    global _CACHE_KEY, _CACHE_ENTRY
+
+    if not os.path.isdir(gemma_path):
+        raise FileNotFoundError(
+            f"Gemma directory not found: {gemma_path}\n"
+            "Expected a local folder with config.json, tokenizer files, and "
+            "*.safetensors weight shards for google/gemma-3-12b-it. See the "
+            "README for how to download it once and where to place it."
+        )
+    if not os.path.isfile(pipeline_path):
+        raise FileNotFoundError(f"Pipeline checkpoint not found: {pipeline_path}")
+
+    key = (gemma_path, pipeline_path, precision)
+    if _CACHE_KEY == key:
+        return _CACHE_ENTRY
+
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-    mode = _select_encode_mode(vram_gb)
+    mode = select_encode_mode(vram_gb, precision)
+    offload = OffloadMode.NONE if mode == "bf16_gpu" else OffloadMode.CPU
 
-    if _ENCODE_MODE == mode:
-        return mode
-
-    _teardown_cache(keep_pipeline=True)
-    _ENCODE_MODE = mode
+    logger.info("Building DistilledPipeline (local, offline, mode=%s)...", mode)
+    pipeline = DistilledPipeline(
+        distilled_checkpoint_path=pipeline_path,
+        gemma_root=gemma_path,
+        spatial_upsampler_path=None,
+        loras=[],
+        offload_mode=offload,
+    )
     pe = pipeline.prompt_encoder
 
+    entry = {"pipeline": pipeline, "mode": mode}
+
     if mode == "nf4":
-        _NF4_GEMMA_MODEL = _build_nf4_gemma(gemma_path)
-        _CACHED_EMB_PROC = pe._embeddings_processor_builder.build(
+        entry["gemma_model"] = _build_nf4_gemma(gemma_path)
+        entry["emb_proc"] = pe._embeddings_processor_builder.build(
             device="cuda", dtype=torch.bfloat16,
         ).eval()
-        _CACHED_TOKENIZER = LTXVGemmaTokenizer(gemma_path)
+        entry["tokenizer"] = LTXVGemmaTokenizer(gemma_path)
         logger.info("NF4 encode path ready (Gemma + emb_proc GPU-resident)")
     elif mode == "bf16_gpu":
-        logger.info("Loading bf16 Gemma text encoder on GPU (one-time)...")
-        _RESIDENT_TEXT_ENCODER = pe._text_encoder_builder.build(
+        logger.info("Loading bf16 Gemma text encoder on GPU (local, one-time)...")
+        entry["text_encoder"] = pe._text_encoder_builder.build(
             device=torch.device("cuda"), dtype=torch.bfloat16,
         ).eval()
-        _CACHED_EMB_PROC = pe._embeddings_processor_builder.build(
+        entry["emb_proc"] = pe._embeddings_processor_builder.build(
             device="cuda", dtype=torch.bfloat16,
         ).eval()
         vram_used_gb = torch.cuda.memory_allocated() / (1024**3)
         logger.info("bf16 Gemma resident: %.1fGB VRAM", vram_used_gb)
     else:
-        logger.info("Streaming encode path (Gemma streams from CPU per call)")
+        logger.info("CPU-streaming encode path ready (Gemma streams from CPU per call)")
 
-    return mode
-
-
-def _teardown_cache(keep_pipeline=False):
-    """Free cached models (used when switching modes or on unload)."""
-    global _PIPELINE, _PIPELINE_KEY, _RESIDENT_TEXT_ENCODER
-    global _NF4_GEMMA_MODEL, _CACHED_EMB_PROC, _CACHED_TOKENIZER, _ENCODE_MODE
-
-    if _RESIDENT_TEXT_ENCODER is not None:
-        try:
-            _RESIDENT_TEXT_ENCODER.teardown()
-        except AttributeError:
-            pass
-        _RESIDENT_TEXT_ENCODER = None
-    _NF4_GEMMA_MODEL = None
-    _CACHED_EMB_PROC = None
-    _CACHED_TOKENIZER = None
-    _ENCODE_MODE = None
-    if not keep_pipeline:
-        _PIPELINE = None
-        _PIPELINE_KEY = None
-    gc.collect()
-    torch.cuda.empty_cache()
+    _CACHE_KEY = key
+    _CACHE_ENTRY = entry
+    return entry
 
 
-def _encode_via_pipeline(compiled_prompt, gemma_path, pipeline_path):
-    """Encode via production's three-path strategy.
+def encode_prompt(text_encoder_entry, compiled_prompt):
+    """Encode a single compiled prompt string with an already-built
+    text_encoder_entry (from build_text_encoder / ScenemaAudioTextEncoderLoader).
 
-    Reuses cached text encoder + emb_proc across calls, matching
-    production/scenema-audio/src/audio_core/engine.py.encode_text.
+    Returns:
+        (video_context, audio_context) tensors.
     """
-    mode = _ensure_cache(gemma_path, pipeline_path)
-    pipeline = _PIPELINE
+    mode = text_encoder_entry["mode"]
+    pipeline = text_encoder_entry["pipeline"]
 
     with torch.inference_mode():
         if mode == "nf4":
-            tp = _CACHED_TOKENIZER.tokenize_with_weights(compiled_prompt)["gemma"]
+            tp = text_encoder_entry["tokenizer"].tokenize_with_weights(compiled_prompt)["gemma"]
             ids = torch.tensor([[t[0] for t in tp]], device="cuda")
             mask = torch.tensor([[w[1] for w in tp]], device="cuda")
-            out = _NF4_GEMMA_MODEL.model(
+            out = text_encoder_entry["gemma_model"].model(
                 input_ids=ids, attention_mask=mask, output_hidden_states=True,
             )
-            hs = out.hidden_states
-            am = mask
-            emb = _CACHED_EMB_PROC.process_hidden_states(hs, am)
+            emb = text_encoder_entry["emb_proc"].process_hidden_states(out.hidden_states, mask)
             del out, ids
         elif mode == "bf16_gpu":
-            hs, am = _RESIDENT_TEXT_ENCODER.encode(compiled_prompt)
-            emb = _CACHED_EMB_PROC.process_hidden_states(hs, am)
+            hs, am = text_encoder_entry["text_encoder"].encode(compiled_prompt)
+            emb = text_encoder_entry["emb_proc"].process_hidden_states(hs, am)
         else:
             (emb,) = pipeline.prompt_encoder([compiled_prompt])
 
@@ -251,10 +190,8 @@ def _encode_via_pipeline(compiled_prompt, gemma_path, pipeline_path):
 
 
 class ScenemaAudioTextEncode:
-    """Encodes text prompts via the LTX pipeline's Gemma-driven encoder.
-
-    Uses the same three-path strategy as production Scenema Audio, chosen
-    automatically based on available VRAM.
+    """Encodes a compiled prompt with an already-loaded Scenema Audio text
+    encoder (connect from Scenema Audio Text Encoder Loader).
     """
 
     CATEGORY = "Scenema Audio"
@@ -267,21 +204,11 @@ class ScenemaAudioTextEncode:
         return {
             "required": {
                 "compiled_prompt": ("STRING", {"forceInput": True}),
-                "model": ("SA_MODEL",),
-            },
-            "optional": {
-                "gemma_path": ("STRING", {"default": "auto"}),
+                "text_encoder": ("SA_TEXT_ENCODER",),
             },
         }
 
-    def encode(self, compiled_prompt, model, gemma_path="auto"):
-        if gemma_path == "auto":
-            gemma_path = DEFAULT_GEMMA
-
-        gemma_local = _resolve_gemma_path(gemma_path)
-        pipeline_path = download_model(PIPELINE_CKPT)
-
-        vc, ac = _encode_via_pipeline(compiled_prompt, gemma_local, pipeline_path)
-
+    def encode(self, compiled_prompt, text_encoder):
+        vc, ac = encode_prompt(text_encoder, compiled_prompt)
         logger.info("Text encoding complete")
         return ({"video_context": vc, "audio_context": ac},)

@@ -8,6 +8,9 @@ No standalone ComfyUI node — the logic is invoked automatically by
 Extended Generate when the chosen scene implies studio-clean intent
 (Absolute silence, Broadcast studio) or when the user overrides via
 strip_background_sfx. See extended_generate.py for the decision logic.
+
+Model weights are loaded from a local checkpoint only — see README for
+the one-time manual download instructions.
 """
 
 import logging
@@ -17,8 +20,8 @@ import sys
 import numpy as np
 import torch
 import torchaudio
-from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
+
 
 # MelBandRoFormer architecture is vendored in vendor/mel_band_roformer/.
 # The parent __init__.py adds vendor/ to sys.path so this import works.
@@ -29,7 +32,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-MELBAND_HF_REPO = "Kijai/MelBandRoFormer_comfy"
 MELBAND_FILENAME = "MelBandRoformer_fp16.safetensors"
 MELBAND_SR = 44100
 CHUNK_SIZE = 352800  # ~8 seconds at 44100Hz
@@ -62,15 +64,18 @@ MODEL_CONFIG = {
 }
 
 
-def _load_melband_model():
-    """Download and load MelBandRoFormer model."""
+def _load_melband_model(model_path):
+    """Load MelBandRoFormer model from a local checkpoint path.
+
+    No fallback lookup here anymore — this is only called by Scenema
+    Audio MelBandRoFormer Loader, which always supplies an explicit path.
+    """
     if MelBandRoformer is None:
         raise ImportError(
             "MelBandRoFormer architecture failed to import from vendor/. "
             "Reinstall the ComfyUI-ScenemaAudio package."
         )
 
-    model_path = hf_hub_download(repo_id=MELBAND_HF_REPO, filename=MELBAND_FILENAME)
     model = MelBandRoformer(**MODEL_CONFIG)
     sd = load_file(model_path)
     model.load_state_dict(sd)
@@ -123,8 +128,15 @@ def _chunked_inference(model, audio_np):
     return result
 
 
-def _run_separator(audio):
-    """Run MelBandRoFormer separation and return (vocals, background) waveforms."""
+def _run_separator(audio, separator):
+    """Run MelBandRoFormer separation and return (vocals, background) waveforms.
+
+    Args:
+        audio: {"waveform": tensor, "sample_rate": int}
+        separator: pre-loaded model from Scenema Audio MelBandRoFormer
+            Loader (SA_SEPARATOR). Required — no internal lazy-loading
+            fallback anymore.
+    """
     waveform = audio["waveform"]
     sr = audio["sample_rate"]
     wav = waveform[0]
@@ -137,10 +149,7 @@ def _run_separator(audio):
     audio_np = wav.numpy()
     logger.info("Separating vocals (%.1fs audio)...", audio_np.shape[1] / MELBAND_SR)
 
-    model = _load_melband_model()
-    vocals_np = _chunked_inference(model, audio_np)
-    del model
-    torch.cuda.empty_cache()
+    vocals_np = _chunked_inference(separator, audio_np)
 
     background_np = audio_np - vocals_np
 
