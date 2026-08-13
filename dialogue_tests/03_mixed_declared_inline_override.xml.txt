@@ -1,0 +1,28 @@
+Test: declared recurring character + a one-off inline episodic character
+(no declaration) + a per-line attribute override (scene changes for one
+line only, everything else stays from the declaration).
+Expect: three clean lines. Line 2's scene should sound different (echoey
+kitchen) from lines 1 and 3 (living room), same speaker voice throughout
+for "Dad".
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming, easily excited." gender="male" scene="Living room, TV glow"/>
+
+  <speak speaker="Dad">
+    <action>Relaxed, half-watching TV</action>
+    Yeah, I'll get the door in a second.
+  </speak>
+  <speak speaker="Dad" scene="Kitchen, tiled and echoey">
+    <action>Shouting from another room</action>
+    Actually, can someone else get it? My hands are covered in flour!
+  </speak>
+  <speak voice="Gruff delivery driver, bored, flat delivery" gender="male">
+    Package for the Connors. Sign here, please.
+  </speak>
+  <speak speaker="Dad">
+    <action>Back to normal, relieved</action>
+    Perfect timing. Thanks for that.
+  </speak>
+</dialogue>

@@ -1,0 +1,22 @@
+Test: <speak_interruption> using the !INTERRUPTION! marker inside party
+1's text instead of dif_param — the splice point should land exactly at
+that word boundary via Whisper alignment, not a blind percentage.
+Watch the console log: it should say
+  "Interruption splice via !INTERRUPTION! marker -> X.XXs"
+If Whisper alignment fails for any reason, it logs a fallback warning and
+uses dif_param instead — that's expected graceful degradation, not a bug,
+but worth noticing if it happens.
+
+---
+
+<dialogue>
+  <speaker id="Man" voice="Male, 40s. Low, controlled." gender="male" scene="Quiet indoor room"/>
+  <speaker id="Woman" voice="Female, late 20s. Sharp, quick." gender="female" scene="Quiet indoor room"/>
+
+  <speak_interruption speakers="Man,Woman">
+    <action_1>He starts explaining, reasonable</action_1>
+    Look, if you would just let me finish explaining !INTERRUPTION! this one thing it would all make sense.
+    <action_2>She cuts in, firm</action_2>
+    No time for that.
+  </speak_interruption>
+</dialogue>

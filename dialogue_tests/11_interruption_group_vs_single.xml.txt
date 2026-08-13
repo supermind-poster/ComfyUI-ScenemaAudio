@@ -1,0 +1,21 @@
+Test: <speak_interruption> where party 1 is a [bracketed] group of two
+speakers (talking over each other in unison) and party 2 is a single
+speaker cutting through both of them.
+Expect: first you hear two voices overlapping (Dad+Timmy, same line),
+then a third distinct voice (Mom) cuts in over their tail and continues
+alone.
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming, excited." gender="male" scene="Living room"/>
+  <speaker id="Timmy" voice="Child, boy about 8. Bright, fast." gender="male" scene="Living room"/>
+  <speaker id="Mom" voice="Female, mid-30s. Warm, firm when needed." gender="female" scene="Living room"/>
+
+  <speak_interruption speakers="[Dad,Timmy],Mom" dif_param="25">
+    <action_1>Dad and Timmy both talking over each other, excited</action_1>
+    This is the best thing I have ever seen in my whole life!
+    <action_2>Mom, cutting through both of them, firm</action_2>
+    Okay, both of you, quiet down for one second.
+  </speak_interruption>
+</dialogue>

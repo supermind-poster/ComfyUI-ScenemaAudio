@@ -1,0 +1,19 @@
+Test: <speak_interruption>, two individuals, no dif_param given -> uses
+the default (15%). Party 2 should cut into roughly the last 15% of
+party 1's line.
+Expect: party 1 plays mostly clean, then near the end party 2's voice
+comes in over the tail, then party 2 continues alone.
+
+---
+
+<dialogue>
+  <speaker id="Man" voice="Male, 40s. Low, controlled." gender="male" scene="Quiet indoor room"/>
+  <speaker id="Woman" voice="Female, late 20s. Sharp, quick." gender="female" scene="Quiet indoor room"/>
+
+  <speak_interruption speakers="Man,Woman">
+    <action_1>He starts explaining, reasonable</action_1>
+    Look, all I'm trying to say is that we should probably talk about this calmly instead of shouting.
+    <action_2>She cuts in, firm</action_2>
+    I'm done talking calmly.
+  </speak_interruption>
+</dialogue>

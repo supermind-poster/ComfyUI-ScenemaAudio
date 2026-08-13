@@ -468,7 +468,18 @@ def _concat_with_silence(audio_list, gap_seconds):
             silence = torch.zeros((w.shape[0], w.shape[1], gap_samples), dtype=w.dtype)
             parts.append(silence)
 
-    combined = torch.cat(parts, dim=-1)
+    max_channels = max(p.shape[1] for p in parts if p is not None)
+    normalized_parts = []
+    for p in parts:
+        if p is None:
+            continue
+        if p.shape[1] < max_channels:
+            p = p.repeat(1, max_channels, 1)
+        elif p.shape[1] > max_channels:
+            p = p[:, :max_channels, :]
+        normalized_parts.append(p)
+
+    combined = torch.cat(normalized_parts, dim=-1)
     return {"waveform": combined, "sample_rate": sr}
 
 

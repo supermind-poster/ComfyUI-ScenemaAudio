@@ -1,0 +1,42 @@
+Test: everything together in one dialogue — solo turns, an overlap, and
+an interruption, across 3 speakers, in a single realistic short scene.
+This is the "does it all work together end to end" check.
+Expect: solo lines play cleanly in order, the overlap section layers two
+voices at once, the interruption section has party 2 cutting into party
+1's tail, and the whole thing concatenates in the correct original order
+with gaps between turns.
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming, easily excited." gender="male" scene="Living room, movie credits rolling"/>
+  <speaker id="Mom" voice="Female, mid-30s. Warm, dry sense of humor." gender="female" scene="Living room, movie credits rolling"/>
+  <speaker id="Timmy" voice="Child, boy about 8. Bright, curious, fast." gender="male" scene="Living room, movie credits rolling"/>
+
+  <speak speaker="Dad">
+    <action>Stretching, grinning</action>
+    Okay, what did we just watch? I haven't stopped smiling.
+  </speak>
+
+  <speak_overlap speakers="Mom,Timmy">
+    <action>Both at once, delighted</action>
+    That was so good!
+  </speak_overlap>
+
+  <speak speaker="Timmy">
+    <action>Bouncing on the couch</action>
+    Can we watch the next one right now?
+  </speak>
+
+  <speak_interruption speakers="Dad,Mom" dif_param="20">
+    <action_1>Dad, considering</action_1>
+    I mean, it is still pretty early, we could probably squeeze in—
+    <action_2>Mom, laughing, cutting him off</action_2>
+    It's a school night. Nice try, though.
+  </speak_interruption>
+
+  <speak speaker="Timmy">
+    <action>Deflating, dramatic</action>
+    Fine. Tomorrow, then.
+  </speak>
+</dialogue>

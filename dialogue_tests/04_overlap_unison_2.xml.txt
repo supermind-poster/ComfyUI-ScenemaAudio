@@ -1,0 +1,16 @@
+Test: <speak_overlap>, 2 speakers, single shared <action> + single text ->
+both speakers say the SAME line at the SAME time (unison/choral delivery).
+Expect: one mixed clip where two distinct voices say "Surprise!" together,
+same start time, roughly same duration.
+
+---
+
+<dialogue>
+  <speaker id="Kim" voice="Female, 20s. Bright, high energy." gender="female" scene="Living room"/>
+  <speaker id="Rae" voice="Female, 40s. Warm, a little raspy." gender="female" scene="Living room"/>
+
+  <speak_overlap speakers="Kim,Rae">
+    <action>Both jump out, delighted</action>
+    Surprise!
+  </speak_overlap>
+</dialogue>

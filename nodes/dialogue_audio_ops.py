@@ -108,5 +108,15 @@ def splice_interrupt(audio_a, audio_b, splice_seconds):
     if b_rest.shape[-1] > 0:
         parts.append(b_rest)
 
-    combined = torch.cat(parts, dim=-1)
+    max_channels = max(p.shape[1] for p in parts if p is not None)
+    normalized_parts = []
+    for p in parts:
+        if p is None:
+            continue
+        if p.shape[1] < max_channels:
+            # Doudling mono to stereo
+            p = p.repeat(1, max_channels, 1)
+        normalized_parts.append(p)
+
+    combined = torch.cat(normalized_parts, dim=-1)
     return {"waveform": combined, "sample_rate": sr}

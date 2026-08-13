@@ -1,0 +1,18 @@
+Test: <speak_interruption> with dif_param="35" — interrupter cuts in much
+earlier (35% of party 1's line overlaps, vs. the 15% default). Compare
+this file's result against 08 to hear the difference dif_param makes.
+Expect: noticeably more overlap between the two voices than in test 08.
+
+---
+
+<dialogue>
+  <speaker id="Man" voice="Male, 40s. Low, controlled." gender="male" scene="Quiet indoor room"/>
+  <speaker id="Woman" voice="Female, late 20s. Sharp, quick." gender="female" scene="Quiet indoor room"/>
+
+  <speak_interruption speakers="Man,Woman" dif_param="35">
+    <action_1>He starts explaining, reasonable</action_1>
+    Look, all I'm trying to say is that we should probably talk about this calmly instead of shouting.
+    <action_2>She cuts in, firm</action_2>
+    I'm done talking calmly.
+  </speak_interruption>
+</dialogue>

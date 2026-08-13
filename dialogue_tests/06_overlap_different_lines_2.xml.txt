@@ -1,0 +1,19 @@
+Test: <speak_overlap>, 2 speakers, DIFFERENT lines via action_1/action_2,
+both starting at the same time (not unison — two separate simultaneous
+lines, like two people blurting out different reactions at once).
+Expect: one mixed clip where you can hear both distinct lines layered
+from the very start, both roughly audible (not one drowning the other).
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming." gender="male" scene="Living room"/>
+  <speaker id="Mom" voice="Female, mid-30s. Warm, dry humor." gender="female" scene="Living room"/>
+
+  <speak_overlap speakers="Dad,Mom">
+    <action_1>Dad, laughing, thrilled</action_1>
+    That's incredible!
+    <action_2>Mom, gasping</action_2>
+    Oh my goodness, did you see that?
+  </speak_overlap>
+</dialogue>

@@ -1,0 +1,39 @@
+Test: same dialogue as 01_basic_declared, but specifically for testing
+the ref_speaker_1 / ref_speaker_2 voice-cloning inputs and their
+progressive-reveal UI behavior.
+
+HOW TO TEST ref_speaker_N:
+1. Load this dialogue_xml into Dialogue Generate as usual, WITHOUT
+   connecting anything to ref_speaker_1 yet. Confirm only ref_speaker_1
+   is visible on the node (no ref_speaker_2 slot yet).
+2. Connect a LoadAudio -> Scenema Audio VAE Encode chain (any short
+   reference clip of a real or distinct voice) into ref_speaker_1.
+   Confirm ref_speaker_2 automatically appears on the node right after
+   you make that connection.
+3. Optionally connect a second reference into ref_speaker_2 (a
+   DIFFERENT voice clip) and confirm ref_speaker_3 then appears too.
+4. Disconnect ref_speaker_2 (if you connected it) and confirm any
+   trailing empty slots beyond ref_speaker_2 get removed again, leaving
+   just ref_speaker_1 and ref_speaker_2 (one connected + one empty).
+5. Queue with only ref_speaker_1 connected. Alex's very first line
+   should already sound like the reference clip you connected, not a
+   freshly-generated voice — that's ref_speaker_1 mapping positionally
+   to Alex, the first speaker to appear in dialogue_xml. Jamie (second
+   speaker to appear) should sound like a fresh voice unless you also
+   connected ref_speaker_2 for her.
+
+---
+
+<dialogue>
+  <speaker id="Alex" voice="Male, 30s. Calm, even-tempered." gender="male" scene="Office, quiet"/>
+  <speaker id="Jamie" voice="Female, 30s. Sharp, a bit impatient." gender="female" scene="Office, quiet"/>
+
+  <speak speaker="Alex">
+    <action>He glances at his watch</action>
+    The meeting was supposed to start ten minutes ago.
+  </speak>
+  <speak speaker="Jamie">
+    <action>She sighs</action>
+    I know. I already sent him a reminder.
+  </speak>
+</dialogue>

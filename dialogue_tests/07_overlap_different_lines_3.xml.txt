@@ -1,0 +1,22 @@
+Test: <speak_overlap>, 3 speakers, three DIFFERENT lines via
+action_1/action_2/action_3, all starting together. Harder mixing case —
+three distinct simultaneous lines.
+Expect: one mixed clip, three different lines layered from the same
+start time, no clipping.
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming." gender="male" scene="Living room"/>
+  <speaker id="Mom" voice="Female, mid-30s. Warm, dry humor." gender="female" scene="Living room"/>
+  <speaker id="Timmy" voice="Child, boy about 8 years old. Bright, fast." gender="male" scene="Living room"/>
+
+  <speak_overlap speakers="Dad,Mom,Timmy">
+    <action_1>Dad, laughing</action_1>
+    That is incredible.
+    <action_2>Mom, gasping</action_2>
+    Oh my goodness.
+    <action_3>Timmy, cheering</action_3>
+    Woohoo, do it again!
+  </speak_overlap>
+</dialogue>

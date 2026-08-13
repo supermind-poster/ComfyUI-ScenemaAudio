@@ -1,0 +1,34 @@
+Test: one recurring speaker across many turns (5+), to check voice
+continuity/A2V chaining holds up over a longer run, plus one scene
+override mid-way through to confirm per-line overrides don't break the
+chain.
+Expect: consistent voice across all 5 lines, audibly different acoustic
+space only on line 3 (echoey hallway) before returning to the office
+scene for the rest.
+
+---
+
+<dialogue>
+  <speaker id="Nora" voice="Female, 30s. Composed radio-announcer clarity." gender="female" scene="Small office"/>
+
+  <speak speaker="Nora">
+    <action>Reading calmly</action>
+    Turn to page twelve, and let's pick up where we left off yesterday.
+  </speak>
+  <speak speaker="Nora">
+    <action>Slight emphasis</action>
+    The second paragraph is the important one — read it twice if you need to.
+  </speak>
+  <speak speaker="Nora" scene="Hallway, tile floor, echoey">
+    <action>Stepping out, voice carrying</action>
+    I'll be right back, just grabbing another copy from the printer.
+  </speak>
+  <speak speaker="Nora">
+    <action>Back, settling in again</action>
+    Okay, where were we? Right, paragraph two.
+  </speak>
+  <speak speaker="Nora">
+    <action>Wrapping up, warm</action>
+    Good work today. Same time tomorrow.
+  </speak>
+</dialogue>

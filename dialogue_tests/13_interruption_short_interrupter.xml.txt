@@ -1,0 +1,21 @@
+Test: edge case where the interrupter's line (party 2) is much SHORTER
+than the overlap window created by dif_param on party 1's (likely much
+longer) line. Exercises the padding logic in splice_interrupt — party 2
+should end well before party 1's natural tail region ends, with the rest
+of that region playing party 1 alone (not silence).
+Expect: no dead air, no abrupt cutoff — party 1's tail continues audibly
+solo after party 2's short line finishes.
+
+---
+
+<dialogue>
+  <speaker id="Man" voice="Male, 50s. Slow, deliberate storyteller." gender="male" scene="Quiet study"/>
+  <speaker id="Kid" voice="Child, boy about 7. Quick, impatient." gender="male" scene="Quiet study"/>
+
+  <speak_interruption speakers="Man,Kid" dif_param="60">
+    <action_1>He's mid-story, unhurried</action_1>
+    And so the old sailor walked slowly down to the harbor, where the fog was thick and the gulls were calling, and nobody had seen a ship come in for three long days.
+    <action_2>Kid, blurting out</action_2>
+    Boring!
+  </speak_interruption>
+</dialogue>

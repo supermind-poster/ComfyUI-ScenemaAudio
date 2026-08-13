@@ -1,0 +1,67 @@
+Scenema Audio Dialogue Generate — test prompt set
+====================================================
+
+16 short XML prompts, one scenario per file, for manual testing of
+Scenema Audio Dialogue Generate. All use the .xml.txt extension so they
+open readably anywhere — the content after the "---" separator in each
+file is the actual XML to paste into the node's dialogue_xml field.
+
+Use with: Scenema Audio Dialogue Generate node.
+
+FILES, GROUPED BY WHAT THEY TEST
+---------------------------------
+
+Basic speaker mechanics (backward compat + declarations):
+  01_basic_declared.xml.txt          - <speaker id> declarations, 2 speakers
+  02_basic_inline_legacy.xml.txt     - old-style, no declarations at all
+  03_mixed_declared_inline_override.xml.txt
+                                      - declared + one-off inline character
+                                        + a per-line attribute override
+
+Overlap (<speak_overlap>):
+  04_overlap_unison_2.xml.txt        - 2 speakers, same line, same time
+  05_overlap_unison_3.xml.txt        - 3 speakers, same line, same time
+  06_overlap_different_lines_2.xml.txt
+                                      - 2 speakers, different lines, action_1/action_2
+  07_overlap_different_lines_3.xml.txt
+                                      - 3 speakers, different lines
+
+Interruption (<speak_interruption>):
+  08_interruption_default_dif.xml.txt
+                                      - two-party, default dif_param (15%)
+  09_interruption_custom_dif.xml.txt - two-party, dif_param="35" (interrupts earlier)
+  10_interruption_marker.xml.txt     - !INTERRUPTION! precise marker instead of dif_param
+  11_interruption_group_vs_single.xml.txt
+                                      - [A,B] interrupted by single C
+  12_interruption_group_vs_group.xml.txt
+                                      - [A,B] interrupted by [C,D]
+  13_interruption_short_interrupter.xml.txt
+                                      - interrupter's line is much shorter than
+                                        the overlap window (tests padding)
+
+Combined / full scenes:
+  14_full_scene_all_mechanics.xml.txt
+                                      - solo + overlap + interruption in one
+                                        dialogue, 4 speakers
+  15_long_multiturn_with_override.xml.txt
+                                      - one character, many turns, one
+                                        scene override mid-way
+  16_ref_speaker_test_notes.xml.txt  - same as 01, with notes on how to
+                                        test ref_speaker_1/2 voice cloning
+
+HOW TO TEST
+-----------
+1. Open a file, copy everything after the "---" line.
+2. Paste into Scenema Audio Dialogue Generate's dialogue_xml field
+   (replacing the default example).
+3. Connect model / vae / text_encoder as usual. For 08-14, also connect
+   voice_clone if the resulting audio is long enough to multi-chunk (short
+   test lines usually won't need it, but connect it anyway to be safe —
+   see the main README).
+4. Queue. Listen to the result, check the console log for what each
+   node did (it logs every solo/overlap/interruption turn, and for
+   interruption turns it logs whether it used the !INTERRUPTION! marker
+   or fell back to dif_param).
+
+Everything here is intentionally short (1-2 sentences per line) so each
+test is fast to run and easy to listen through.

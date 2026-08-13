@@ -1,0 +1,18 @@
+Test: <speak_overlap>, 3 speakers, unison (same line, same time). Same
+mechanism as 04 but with more voices layered — good check that mixing
+doesn't clip or distort with 3 simultaneous tracks.
+Expect: one mixed clip, three distinct voices saying the same line
+together, no obvious clipping/distortion.
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming." gender="male" scene="Living room, movie credits rolling"/>
+  <speaker id="Mom" voice="Female, mid-30s. Warm, dry humor." gender="female" scene="Living room, movie credits rolling"/>
+  <speaker id="Timmy" voice="Child, boy about 8 years old. Bright, fast." gender="male" scene="Living room, movie credits rolling"/>
+
+  <speak_overlap speakers="Dad,Mom,Timmy">
+    <action>All three at once, thrilled</action>
+    That was amazing!
+  </speak_overlap>
+</dialogue>

@@ -1,0 +1,16 @@
+Test: old-style dialogue, zero <speaker> declarations, full inline voice= on
+every turn. Confirms full backward compatibility with the original format.
+Expect: two clean lines, one per speaker, stitched with the default gap.
+
+---
+
+<dialogue>
+  <speak voice="Deep male voice, gravelly, tired" gender="male" scene="Dim room">
+    <action>He leans forward</action>
+    Where were you last night?
+  </speak>
+  <speak voice="Nervous young woman, quick to fill silence" gender="female" scene="Dim room">
+    <action>She hesitates</action>
+    I... I was at home. Why does it matter?
+  </speak>
+</dialogue>

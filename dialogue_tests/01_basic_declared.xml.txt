@@ -1,0 +1,18 @@
+Test: basic <speaker id> declarations, 2 speakers, no overlap/interruption.
+Expect: two clean lines, one per speaker, stitched with the default gap.
+
+---
+
+<dialogue>
+  <speaker id="Alex" voice="Male, 30s. Calm, even-tempered." gender="male" scene="Office, quiet"/>
+  <speaker id="Jamie" voice="Female, 30s. Sharp, a bit impatient." gender="female" scene="Office, quiet"/>
+
+  <speak speaker="Alex">
+    <action>He glances at his watch</action>
+    The meeting was supposed to start ten minutes ago.
+  </speak>
+  <speak speaker="Jamie">
+    <action>She sighs</action>
+    I know. I already sent him a reminder.
+  </speak>
+</dialogue>

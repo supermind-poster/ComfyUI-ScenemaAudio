@@ -1,0 +1,22 @@
+Test: <speak_interruption> where BOTH parties are [bracketed] groups —
+two people talking over each other, interrupted by two other people also
+talking over each other. Most complex mixing case in the whole set: 4
+distinct voices across two overlap-mixes, then spliced together.
+Expect: first a 2-voice unison line, then near the end a different
+2-voice unison line cuts in and continues after the first pair stops.
+
+---
+
+<dialogue>
+  <speaker id="Dad" voice="Male, late 30s. Warm, booming." gender="male" scene="Living room"/>
+  <speaker id="Timmy" voice="Child, boy about 8. Bright, fast." gender="male" scene="Living room"/>
+  <speaker id="Mom" voice="Female, mid-30s. Warm, firm." gender="female" scene="Living room"/>
+  <speaker id="Grandma" voice="Female, 70s. Gentle but no-nonsense." gender="female" scene="Living room"/>
+
+  <speak_interruption speakers="[Dad,Timmy],[Mom,Grandma]" dif_param="30">
+    <action_1>Dad and Timmy arguing about the remote, overlapping</action_1>
+    Give it back, I had it first!
+    <action_2>Mom and Grandma, both scolding at once</action_2>
+    Both of you, enough, right now!
+  </speak_interruption>
+</dialogue>
